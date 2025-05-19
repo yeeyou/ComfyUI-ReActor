@@ -183,46 +183,10 @@ def get_ort_session():
     global ORT_SESSION
     return ORT_SESSION
 
-def set_ort_session(model_path, providers) -> onnxruntime.InferenceSession: # 明确返回类型
+def set_ort_session(model_path, providers) -> Any:
     global ORT_SESSION
-    onnxruntime.set_default_logger_severity(3) # 这行保持不变
-
-    # --- 新增 SessionOptions 配置 (硬编码线程数为 4) ---
-    so = onnxruntime.SessionOptions()
-    so.graph_optimization_level = onnxruntime.GraphOptimizationLevel.ORT_ENABLE_ALL
-    
-    # 硬编码线程数为 4
-    desired_cpu_threads = 4 
-    print(f"[ReActor ONNX Config - utils HACK] Hardcoding ONNX threads to: {desired_cpu_threads}")
-
-    
-    cpu_provider_exists = False
-    if providers: # 确保 providers 不是 None 或空列表
-        for provider_item in providers:
-            if isinstance(provider_item, str) and 'CPUExecutionProvider' in provider_item:
-                cpu_provider_exists = True
-                break
-            elif isinstance(provider_item, tuple) and 'CPUExecutionProvider' in provider_item[0]: # Provider 可以是 (name, options_dict) 的元组
-                cpu_provider_exists = True
-                break
-    
-    if cpu_provider_exists:
-        so.intra_op_num_threads = desired_cpu_threads
-        so.inter_op_num_threads = desired_cpu_threads # 通常可以设置为相同
-        print(f"[ReActor ONNX Config - utils HACK] CPU intra/inter_op_num_threads set to: {desired_cpu_threads} because CPUExecutionProvider found in {providers}")
-    else:
-        print(f"[ReActor ONNX Config - utils HACK] CPUExecutionProvider not found in providers {providers}. CPU thread config skipped for this session.")
-
-    print(f"[ReActor ONNX Config - utils HACK] Creating session for: {model_path} with providers: {providers}")
-    try:
-        ORT_SESSION = onnxruntime.InferenceSession(model_path, sess_options=so, providers=providers)
-        print(f"[ReActor ONNX Config - utils HACK] Session created. Effective providers: {ORT_SESSION.get_providers()}")
-    except Exception as e:
-        print(f"[ReActor ONNX Config - utils HACK] Error creating ONNX session for {model_path} with options: {e}")
-        print(f"[ReActor ONNX Config - utils HACK] Falling back to default session options for {model_path}.")
-        # 出错时回退到不带自定义选项的加载方式
-        ORT_SESSION = onnxruntime.InferenceSession(model_path, providers=providers) 
-        
+    onnxruntime.set_default_logger_severity(3)
+    ORT_SESSION = onnxruntime.InferenceSession(model_path, providers=providers)
     return ORT_SESSION
 
 def clear_ort_session() -> None:
