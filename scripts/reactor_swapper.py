@@ -473,6 +473,31 @@ def _swap_face_many_worker(
             
     return original_image_index, current_target_cv2_bgr
 
+# --- NEW WORKER FUNCTION FOR PARALLEL FACE ANALYSIS ---
+def _analyze_single_target_image_worker(
+    pil_img: Image.Image, 
+    original_image_index: int
+) -> tuple[int, np.ndarray, list]: # Returns: original_idx, cv2_bgr_array, list_of_faces
+    thread_id = threading.get_ident()
+    # 使用 logger.status 以便在你的环境中更容易看到输出
+    logger.status(f"[AnalyzeWorker {thread_id} HACK] Analyzing image original_index: {original_image_index}")
+    try:
+        cv2_bgr = cv2.cvtColor(np.array(pil_img), cv2.COLOR_RGB2BGR)
+        # 确保 analyze_faces 返回的是 Face 对象列表或空列表
+        faces_found = analyze_faces(cv2_bgr) 
+        logger.status(f"[AnalyzeWorker {thread_id} HACK] Finished image original_index: {original_image_index}, found {len(faces_found if faces_found else [])} faces.")
+        return original_image_index, cv2_bgr, faces_found if faces_found else []
+    except Exception as e_analyze:
+        logger.error(f"[AnalyzeWorker {thread_id} HACK] Error analyzing image original_index: {original_image_index}: {e_analyze}")
+        try:
+            # 尝试返回原始转换后的图像和空人脸列表作为回退
+            cv2_bgr_fallback = cv2.cvtColor(np.array(pil_img), cv2.COLOR_RGB2BGR)
+            return original_image_index, cv2_bgr_fallback, []
+        except: 
+            # 如果连转换都失败，返回一个明确的错误指示或一个空的小图像
+            logger.error(f"[AnalyzeWorker {thread_id} HACK] Critical error converting image original_index: {original_image_index} for fallback.")
+            return original_image_index, np.zeros((10,10,3), dtype=np.uint8), []
+
 
 def swap_face_many(
     source_img: Union[Image.Image, None],    # PIL Image from ReActor node
@@ -586,79 +611,133 @@ def swap_face_many(
         logger.error(f"[swap_face_many HACK] Error loading FaceSwapModel: {e_load_swapper}")
         return target_imgs
 
-    # --- 3. Pre-analyze all target images for faces (serially, to prepare for workers) ---
-    # And convert PIL to CV2 BGR
-    logger.status(f"[swap_face_many HACK] Pre-analyzing {len(target_imgs)} target images...")
+    # --- 3. Parallel Pre-analysis of all target images for faces ---
+    # --- THIS SECTION IS REPLACED ---
+    logger.status(f"[swap_face_many HACK] Parallel pre-analyzing {len(target_imgs)} target images using {num_threads} threads...")
     
-    # Clear previous target cache for a new batch run
-    TARGET_FACES_LIST = [] 
-    TARGET_IMAGE_LIST_HASH = []
+    analysis_results_ordered = [(None, None)] * len(target_imgs) # (cv2_bgr_img, list_of_faces_on_img)
 
-    targets_data_for_workers = [] # List of tuples: (original_idx, cv2_bgr_img, list_of_faces_on_img)
-    for i, pil_img in enumerate(target_imgs):
-        cv2_bgr = cv2.cvtColor(np.array(pil_img), cv2.COLOR_RGB2BGR)
-        
-        # Use MD5 hash for caching target analysis for this run
-        target_md5 = get_image_md5hash(cv2_bgr)
-        
-        # Check cache (TARGET_FACES_LIST and TARGET_IMAGE_LIST_HASH are now per-batch)
-        # The original caching was a bit complex for `swap_face_many`.
-        # For simplicity in parallel version, let's re-analyze or use a simpler per-batch cache.
-        # The global cache might cause issues with parallel workers if not handled carefully.
-        # Let's assume for now we re-analyze each target image in this pre-analysis step.
-        # You can re-introduce caching here if needed, ensuring it's safe for this new structure.
-        
-        logger.debug(f"[swap_face_many HACK] Analyzing target image index {i}")
-        analyzed_t_faces = analyze_faces(cv2_bgr) # Returns list of Face objects or empty list
-        
-        # Store for this batch run (if you want to re-implement caching for this call)
-        # TARGET_IMAGE_LIST_HASH.append(target_md5)
-        # TARGET_FACES_LIST.append(analyzed_t_faces)
-        
-        targets_data_for_workers.append((i, cv2_bgr, analyzed_t_faces if analyzed_t_faces else []))
+    if not target_imgs: # 处理空 target_imgs 列表的情况
+        logger.warning("[swap_face_many HACK] target_imgs list is empty before analysis.")
+    elif num_threads == 1 or len(target_imgs) == 1: # 如果只有一个线程或一张图，串行分析
+        logger.status(f"[swap_face_many HACK] Analyzing {len(target_imgs)} target image(s) serially (due to num_threads=1 or single image).")
+        for i, pil_img_target in enumerate(target_imgs):
+            _idx, cv2_bgr_res, faces_found_res = _analyze_single_target_image_worker(pil_img_target, i)
+            analysis_results_ordered[i] = (cv2_bgr_res, faces_found_res)
+    else: # 并行分析
+        with ThreadPoolExecutor(max_workers=num_threads) as analyzer_executor:
+            future_to_analysis_idx = {}
+            for i, pil_img_target in enumerate(target_imgs):
+                future = analyzer_executor.submit(_analyze_single_target_image_worker, pil_img_target, i)
+                future_to_analysis_idx[future] = i
+            
+            logger.status(f"[swap_face_many HACK] All {len(future_to_analysis_idx)} analysis tasks submitted. Waiting for completion...")
+            for future in as_completed(future_to_analysis_idx):
+                original_idx = future_to_analysis_idx[future]
+                try:
+                    _idx, cv2_bgr_res, faces_found_res = future.result()
+                    analysis_results_ordered[original_idx] = (cv2_bgr_res, faces_found_res)
+                except Exception as e_future_analyze:
+                    logger.error(f"[swap_face_many HACK] Error during parallel analysis for image index {original_idx}: {e_future_analyze}")
+                    # Fallback for this specific image
+                    try:
+                        pil_img_fallback = target_imgs[original_idx] # Get original PIL
+                        cv2_bgr_fallback_analyze = cv2.cvtColor(np.array(pil_img_fallback), cv2.COLOR_RGB2BGR)
+                        analysis_results_ordered[original_idx] = (cv2_bgr_fallback_analyze, [])
+                    except Exception as e_crit_fallback:
+                         logger.error(f"[swap_face_many HACK] Critical fallback error for image {original_idx}: {e_crit_fallback}")
+                         analysis_results_ordered[original_idx] = (np.zeros((10,10,3), dtype=np.uint8), []) # Last resort placeholder
+    
+    logger.status(f"[swap_face_many HACK] Finished parallel pre-analysis. Results count: {len(analysis_results_ordered)}")
 
+    # 将分析结果转换为 targets_data_for_swap_workers 列表 (格式: [{'original_idx': i, 'cv2_img': ..., 'faces': ...}, ...])
+    targets_data_for_workers = []
+    for i in range(len(target_imgs)): # 使用 len(target_imgs) 来确保索引正确
+        if i < len(analysis_results_ordered) and analysis_results_ordered[i][0] is not None:
+            cv2_bgr_img, faces_on_img = analysis_results_ordered[i]
+        else: # 如果 analysis_results_ordered 由于某种原因没有对应项，或分析失败返回了 None
+            logger.warning(f"[swap_face_many HACK] Missing or failed analysis result for original image index {i}. Using placeholder.")
+            # 创建一个黑色图像或从原始 target_imgs[i] 转换（如果还想尝试）
+            try:
+                cv2_bgr_img = cv2.cvtColor(np.array(target_imgs[i]), cv2.COLOR_RGB2BGR) if target_imgs[i] else np.zeros((100,100,3), dtype=np.uint8)
+            except:
+                cv2_bgr_img = np.zeros((100,100,3), dtype=np.uint8) # 应急的黑色图像
+            faces_on_img = []
+        targets_data_for_workers.append({'original_idx': i, 'cv2_img': cv2_bgr_img, 'faces': faces_on_img})
+    # --- END OF REPLACED SECTION ---
+    
     # --- 4. Parallel Processing using ThreadPoolExecutor ---
-    
-    
-    processed_cv2_images = [None] * len(target_imgs) # To store results in original order
-    NUM_PARALLEL_TASKS_HARDCODED = num_threads
-    if len(target_imgs) == 1 or NUM_PARALLEL_TASKS_HARDCODED == 1:
-        logger.info(f"[swap_face_many HACK] Processing {len(target_imgs)} image(s) serially.")
-        for original_idx, cv2_bgr_img, faces_on_img in targets_data_for_workers:
+    processed_cv2_images = [None] * len(target_imgs)
+    # NUM_PARALLEL_TASKS_HARDCODED = num_threads # 直接使用 num_threads
+
+    if len(target_imgs) == 1 or num_threads == 1:
+        logger.status(f"[swap_face_many HACK] Processing face swap for {len(target_imgs)} image(s) serially.") # 使用 logger.status
+        # --- 修改串行循环 ---
+        for item_data in targets_data_for_workers: # 迭代字典列表
+            original_idx = item_data['original_idx']
+            cv2_bgr_img_to_process = item_data['cv2_img']
+            faces_on_img_to_process = item_data['faces']
+            
+            # 确保 cv2_bgr_img_to_process 是 NumPy 数组
+            if not isinstance(cv2_bgr_img_to_process, np.ndarray):
+                logger.error(f"[swap_face_many HACK] Serial: Item at index {original_idx} 'cv2_img' is not a NumPy array, but {type(cv2_bgr_img_to_process)}. Skipping.")
+                processed_cv2_images[original_idx] = cv2_bgr_img_to_process # 或者一个错误占位符
+                continue
+            
             try:
                 _idx, result_img = _swap_face_many_worker(
-                    cv2_bgr_img, faces_on_img, actual_source_face_obj,
-                    faces_index, gender_target, faces_order, face_swapper,
+                    cv2_bgr_img_to_process, faces_on_img_to_process, actual_source_face_obj,
+                    faces_index, gender_target, faces_order, face_swapper, # face_swapper 是加载的模型实例
                     face_boost_enabled, face_restore_model, face_restore_visibility,
-                    codeformer_weight, interpolation, original_idx
+                    codeformer_weight, interpolation, original_idx # 传递 original_idx
                 )
                 processed_cv2_images[original_idx] = result_img
             except Exception as e_serial_worker:
-                logger.error(f"[swap_face_many HACK] Error in serial worker for image {original_idx}: {e_serial_worker}")
-                processed_cv2_images[original_idx] = cv2_bgr_img # Fallback to original
+                logger.error(f"[swap_face_many HACK] Error in serial swap worker for image {original_idx}: {e_serial_worker}")
+                processed_cv2_images[original_idx] = cv2_bgr_img_to_process # Fallback to original (which is already a CV2 BGR array)
     else:
-        logger.status(f"[swap_face_many HACK] Processing {len(target_imgs)} image(s) with {NUM_PARALLEL_TASKS_HARDCODED} parallel tasks.")
-        with ThreadPoolExecutor(max_workers=NUM_PARALLEL_TASKS_HARDCODED) as executor:
+        logger.status(f"[swap_face_many HACK] Processing face swap for {len(target_imgs)} image(s) with {num_threads} parallel tasks (swap stage).") # 使用 logger.status
+        with ThreadPoolExecutor(max_workers=num_threads) as executor: # Renamed to 'executor' from 'swap_executor' for consistency
             future_to_idx = {}
-            for original_idx, cv2_bgr_img, faces_on_img in targets_data_for_workers:
+            # --- 修改并行任务提交循环 ---
+            for item_data in targets_data_for_workers: # 迭代字典列表
+                original_idx_submit = item_data['original_idx']
+                cv2_bgr_img_submit = item_data['cv2_img']
+                faces_on_img_submit = item_data['faces']
+
+                # 确保 cv2_bgr_img_submit 是 NumPy 数组
+                if not isinstance(cv2_bgr_img_submit, np.ndarray):
+                    logger.error(f"[swap_face_many HACK] Parallel Submit: Item at index {original_idx_submit} 'cv2_img' is not a NumPy array, but {type(cv2_bgr_img_submit)}. Skipping submit for this item.")
+                    # 需要处理这种情况，例如直接将原始（可能是错误的）数据放入结果，或者跳过
+                    # 为了简单，我们先跳过提交，后续结果收集时会用原始数据填充
+                    processed_cv2_images[original_idx_submit] = cv2_bgr_img_submit # 预填充原始（可能是错误的）
+                    continue
+
                 future = executor.submit(
                     _swap_face_many_worker,
-                    cv2_bgr_img, faces_on_img, actual_source_face_obj,
-                    faces_index, gender_target, faces_order, face_swapper,
+                    cv2_bgr_img_submit, faces_on_img_submit, actual_source_face_obj,
+                    faces_index, gender_target, faces_order, face_swapper, # face_swapper 是加载的模型实例
                     face_boost_enabled, face_restore_model, face_restore_visibility,
-                    codeformer_weight, interpolation, original_idx
+                    codeformer_weight, interpolation, original_idx_submit # 传递 original_idx_submit
                 )
-                future_to_idx[future] = original_idx
+                future_to_idx[future] = original_idx_submit # 使用 original_idx_submit
             
+            logger.status(f"[swap_face_many HACK] All {len(future_to_idx)} swap tasks submitted. Waiting for completion...") # 使用 logger.status
             for future in as_completed(future_to_idx):
-                idx = future_to_idx[future]
+                idx_completed = future_to_idx[future] # 这是正确的 original_idx
                 try:
                     _returned_idx, result_cv2_img = future.result()
-                    processed_cv2_images[idx] = result_cv2_img
-                except Exception as e_future:
-                    logger.error(f"[swap_face_many HACK] Exception from worker for image index {idx}: {e_future}")
-                    # Fallback to original image (already in targets_data_for_workers[idx][1])
-                    processed_cv2_images[idx] = targets_data_for_workers[idx][1] 
+                    processed_cv2_images[idx_completed] = result_cv2_img
+                except Exception as e_future: # Renamed from e_future_swap
+                    logger.error(f"[swap_face_many HACK] Exception from swap worker for image index {idx_completed}: {e_future}")
+                    # Fallback to original image
+                    # targets_data_for_workers[idx_completed]['cv2_img'] 应该是原始的CV2 BGR图像
+                    if idx_completed < len(targets_data_for_workers) and isinstance(targets_data_for_workers[idx_completed]['cv2_img'], np.ndarray):
+                        processed_cv2_images[idx_completed] = targets_data_for_workers[idx_completed]['cv2_img']
+                    else: # 如果连原始数据都找不到了或类型不对，放一个黑色占位符
+                        logger.error(f"[swap_face_many HACK] Fallback error: Could not retrieve original cv2_img for index {idx_completed}")
+                        ph, pw = target_imgs[idx_completed].height if idx_completed < len(target_imgs) else 100, target_imgs[idx_completed].width if idx_completed < len(target_imgs) else 100
+                        processed_cv2_images[idx_completed] = np.zeros((ph, pw, 3), dtype=np.uint8)
 
     # --- 5. Convert processed CV2 BGR images back to PIL RGB ---
     final_pil_results = []
