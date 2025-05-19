@@ -54,6 +54,7 @@ class FaceSwapScript(scripts.Script):
         gender_target,
         face_model,
         faces_order,
+        num_threads,  
         face_boost_enabled,
         face_restore_model,
         face_restore_visibility,
@@ -158,6 +159,7 @@ class FaceSwapScript(scripts.Script):
                         face_restore_visibility=self.face_restore_visibility,
                         codeformer_weight=self.codeformer_weight,
                         interpolation=self.interpolation,
+                        num_threads=num_threads,  # 添加此行
                     )
                     p.init_images = result
 

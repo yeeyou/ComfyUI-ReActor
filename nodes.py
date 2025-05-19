@@ -59,13 +59,13 @@ import scripts.r_masking.subcore as subcore
 import scripts.r_masking.core as core
 import scripts.r_masking.segs as masking_segs
 
-import scripts.reactor_sfw as sfw
+# import scripts.reactor_sfw as sfw
 
 
 models_dir = folder_paths.models_dir
 REACTOR_MODELS_PATH = os.path.join(models_dir, "reactor")
 FACE_MODELS_PATH = os.path.join(REACTOR_MODELS_PATH, "faces")
-NSFWDET_MODEL_PATH = os.path.join(models_dir, "nsfw_detector","vit-base-nsfw-detector")
+# NSFWDET_MODEL_PATH = os.path.join(models_dir, "nsfw_detector","vit-base-nsfw-detector")
 
 if not os.path.exists(REACTOR_MODELS_PATH):
     os.makedirs(REACTOR_MODELS_PATH)
@@ -143,6 +143,7 @@ class reactor:
                 "input_faces_index": ("STRING", {"default": "0"}),
                 "source_faces_index": ("STRING", {"default": "0"}),
                 "console_log_level": ([0, 1, 2], {"default": 1}),
+                "num_threads": ("INT", {"default": 4, "min": 1, "max": 64, "step": 1}),
             },
             "optional": {
                 "source_image": ("IMAGE",),
@@ -318,7 +319,7 @@ class reactor:
 
         return result
 
-    def execute(self, enabled, input_image, swap_model, detect_gender_source, detect_gender_input, source_faces_index, input_faces_index, console_log_level, face_restore_model,face_restore_visibility, codeformer_weight, facedetection, source_image=None, face_model=None, faces_order=None, face_boost=None):
+    def execute(self, enabled, input_image, swap_model, detect_gender_source, detect_gender_input, source_faces_index, input_faces_index, console_log_level, face_restore_model,face_restore_visibility, codeformer_weight, facedetection,num_threads, source_image=None, face_model=None, faces_order=None, face_boost=None):
 
         if face_boost is not None:
             self.face_boost_enabled = face_boost["enabled"]
@@ -347,20 +348,20 @@ class reactor:
         script = FaceSwapScript()
         pil_images = batch_tensor_to_pil(input_image)
 
-        # NSFW checker
-        logger.status("Checking for any unsafe content")
-        pil_images_sfw = []
-        tmp_img = "reactor_tmp.png"
-        for img in pil_images:
-            if state.interrupted or model_management.processing_interrupted():
-                logger.status("Interrupted by User")
-                break
-            img.save(tmp_img)
-            if not sfw.nsfw_image(tmp_img, NSFWDET_MODEL_PATH):
-                pil_images_sfw.append(img)
-        if os.path.exists(tmp_img):
-            os.remove(tmp_img)
-        pil_images = pil_images_sfw
+        # # NSFW checker
+        # logger.status("Checking for any unsafe content")
+        # pil_images_sfw = []
+        # tmp_img = "reactor_tmp.png"
+        # for img in pil_images:
+        #     if state.interrupted or model_management.processing_interrupted():
+        #         logger.status("Interrupted by User")
+        #         break
+        #     img.save(tmp_img)
+        #     if not sfw.nsfw_image(tmp_img, NSFWDET_MODEL_PATH):
+        #         pil_images_sfw.append(img)
+        # if os.path.exists(tmp_img):
+        #     os.remove(tmp_img)
+        # pil_images = pil_images_sfw
         # # #
 
         if len(pil_images) > 0:
@@ -383,6 +384,7 @@ class reactor:
                 gender_target=detect_gender_input,
                 face_model=face_model,
                 faces_order=faces_order,
+                num_threads=num_threads,  # 添加此行传递num_threads参数
                 # face boost:
                 face_boost_enabled=self.face_boost_enabled,
                 face_restore_model=self.boost_model,
